@@ -72,6 +72,7 @@ enum {
   TL_OP_SOFTMAX_BACKWARD = 16,
   TL_OP_LAYER_NORM = 17,
   TL_OP_LAYER_NORM_BACKWARD = 18,
+  TL_OP_FILL = 19,
   TL_OP_COUNT_MAX = 64
 };
 
@@ -95,6 +96,7 @@ static const char *tl_op_names[TL_OP_COUNT_MAX] = {
     [TL_OP_SOFTMAX_BACKWARD] = "softmax_last_backward",
     [TL_OP_LAYER_NORM] = "layer_norm",
     [TL_OP_LAYER_NORM_BACKWARD] = "layer_norm_backward",
+    [TL_OP_FILL] = "fill",
 };
 
 static int tl_enabled_flag = 1;
@@ -103,6 +105,7 @@ static int tl_debug_flag = 0;
 static size_t tl_thread_count = 1;
 static atomic_size_t tl_native_calls[TL_OP_COUNT_MAX];
 static atomic_size_t tl_fallback_calls[TL_OP_COUNT_MAX];
+static atomic_size_t tl_native_nanos[TL_OP_COUNT_MAX];
 static pthread_once_t tl_config_once = PTHREAD_ONCE_INIT;
 
 static void tl_print_stats(void) {
@@ -115,8 +118,10 @@ static void tl_print_stats(void) {
       continue;
     }
     const char *name = tl_op_names[op] ? tl_op_names[op] : "?";
-    fprintf(stderr, "[fastcpu] %-20s native %zu  reference %zu\n", name,
-            native, fallback);
+    fprintf(stderr,
+            "[fastcpu] %-22s native %8zu  reference %6zu  native time %9.3f s\n",
+            name, native, fallback,
+            (double)atomic_load(&tl_native_nanos[op]) * 1e-9);
   }
 }
 
@@ -170,6 +175,21 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_note_fallback(uint32_t op,
 static void tl_note_native(int op) {
   if (op >= 0 && op < TL_OP_COUNT_MAX) {
     atomic_fetch_add(&tl_native_calls[op], 1);
+  }
+}
+
+#include <time.h>
+
+static uint64_t tl_now_nanos(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* Wall time spent inside native kernels, per op (statistics only). */
+static void tl_note_time(int op, uint64_t start) {
+  if (tl_stats_flag && op >= 0 && op < TL_OP_COUNT_MAX) {
+    atomic_fetch_add(&tl_native_nanos[op], tl_now_nanos() - start);
   }
 }
 
@@ -649,6 +669,7 @@ static lean_obj_res tl_bmm(int op, b_lean_obj_arg lhs, size_t l_bs, size_t l_rs,
                            size_t l_cs, b_lean_obj_arg rhs, size_t r_bs,
                            size_t r_rs, size_t r_cs, size_t batch, size_t m,
                            size_t k, size_t n) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   tl_check_view(lhs, batch, m, k, l_bs, l_rs, l_cs);
   tl_check_view(rhs, batch, k, n, r_bs, r_rs, r_cs);
@@ -689,6 +710,7 @@ static lean_obj_res tl_bmm(int op, b_lean_obj_arg lhs, size_t l_bs, size_t l_rs,
   tl_choose_blocks(&job, batch);
   tl_parallel(batch * job.row_blocks * job.col_blocks, tl_mm_task, &job);
   free(packed);
+  tl_note_time(op, tl_t0);
   return out;
 }
 
@@ -992,6 +1014,7 @@ static void tl_ew_task(void *ctx, size_t task) {
 
 static lean_obj_res tl_elementwise(int op, b_lean_obj_arg a, b_lean_obj_arg b,
                                    double c) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t n = lean_sarray_size(a);
   if (b != NULL && lean_sarray_size(b) < n) {
@@ -1003,6 +1026,7 @@ static lean_obj_res tl_elementwise(int op, b_lean_obj_arg a, b_lean_obj_arg b,
                      b ? lean_float_array_cptr(b) : NULL,
                      lean_float_array_cptr(out), n, c};
   tl_parallel(tl_chunks(n), tl_ew_task, &job);
+  tl_note_time(op, tl_t0);
   return out;
 }
 
@@ -1066,6 +1090,7 @@ static size_t tl_shape_size(const size_t *dims, int rank) {
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_broadcast(b_lean_obj_arg x,
                                                      b_lean_obj_arg source,
                                                      b_lean_obj_arg target) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t src[TL_MAX_RANK], dst[TL_MAX_RANK], stride[TL_MAX_RANK];
   int sr = tl_read_shape(source, src), dr = tl_read_shape(target, dst);
@@ -1111,6 +1136,7 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_broadcast(b_lean_obj_arg x,
       idx[i] = 0;
     }
   }
+  tl_note_time(TL_OP_BROADCAST, tl_t0);
   return out;
 }
 
@@ -1144,6 +1170,7 @@ static void tl_reduce_task(void *ctx, size_t task) {
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_reduce_leading(b_lean_obj_arg x,
                                                           b_lean_obj_arg lead,
                                                           size_t inner) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t dims[TL_MAX_RANK];
   int rank = tl_read_shape(lead, dims);
@@ -1179,6 +1206,7 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_reduce_leading(b_lean_obj_arg x,
   lean_object *out = tl_alloc_floats(rest);
   memcpy(lean_float_array_cptr(out), current, rest * sizeof(double));
   free(current);
+  tl_note_time(TL_OP_REDUCE_BROADCAST, tl_t0);
   return out;
 }
 
@@ -1206,6 +1234,7 @@ static void tl_swap_task(void *ctx, size_t task) {
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_swap(b_lean_obj_arg x,
                                                 size_t outer, size_t a,
                                                 size_t b, size_t inner) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t n = tl_mul_checked(tl_mul_checked(tl_mul_checked(outer, a), b), inner);
   if (n != lean_sarray_size(x)) {
@@ -1216,6 +1245,7 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_swap(b_lean_obj_arg x,
   tl_swap_job_t job = {lean_float_array_cptr(x), lean_float_array_cptr(out),
                        outer, a, b, inner};
   tl_parallel(outer * b, tl_swap_task, &job);
+  tl_note_time(TL_OP_SWAP, tl_t0);
   return out;
 }
 
@@ -1275,6 +1305,7 @@ static void tl_softmax_task(void *ctx, size_t task) {
 
 static lean_obj_res tl_softmax(int op, b_lean_obj_arg x, b_lean_obj_arg dy,
                                size_t rows, size_t n) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t total = tl_mul_checked(rows, n);
   if (n == 0 || lean_sarray_size(x) != total ||
@@ -1289,6 +1320,7 @@ static lean_obj_res tl_softmax(int op, b_lean_obj_arg x, b_lean_obj_arg dy,
                           dy != NULL};
   size_t per = TL_CHUNK / n + 1;
   tl_parallel((rows + per - 1) / per, tl_softmax_task, &job);
+  tl_note_time(op, tl_t0);
   return out;
 }
 
@@ -1414,6 +1446,7 @@ static void tl_colsum_task(void *ctx, size_t task) {
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_layer_norm(
     b_lean_obj_arg x, b_lean_obj_arg gamma, b_lean_obj_arg beta, size_t rows,
     size_t width, b_lean_obj_arg eps) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t total = tl_mul_checked(rows, width);
   if (width == 0 || lean_sarray_size(x) != total ||
@@ -1428,6 +1461,7 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_layer_norm(
                      tl_float_of_boxed(eps), 0};
   size_t per = TL_CHUNK / width + 1;
   tl_parallel((rows + per - 1) / per, tl_ln_task, &job);
+  tl_note_time(TL_OP_LAYER_NORM, tl_t0);
   return out;
 }
 
@@ -1435,6 +1469,7 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_layer_norm(
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_layer_norm_backward(
     b_lean_obj_arg x, b_lean_obj_arg gamma, b_lean_obj_arg dy, size_t rows,
     size_t width, b_lean_obj_arg eps) {
+  uint64_t tl_t0 = tl_now_nanos();
   tl_config();
   size_t total = tl_mul_checked(rows, width);
   if (width == 0 || lean_sarray_size(x) != total ||
@@ -1469,18 +1504,23 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_layer_norm_backward(
   lean_object *triple = lean_alloc_ctor(0, 2, 0);
   lean_ctor_set(triple, 0, dx);
   lean_ctor_set(triple, 1, pair);
+  tl_note_time(TL_OP_LAYER_NORM_BACKWARD, tl_t0);
   return triple;
 }
 
 /* Lean: `TorchLean.FastCpu.fillNative (n : USize) (value : @& α)`. */
 LEAN_EXPORT lean_obj_res torchlean_fastcpu_fill(size_t n,
                                                 b_lean_obj_arg value) {
+  uint64_t tl_t0 = tl_now_nanos();
+  tl_config();
   double v = tl_float_of_boxed(value);
   lean_object *out = tl_alloc_floats(n);
+  tl_note_native(TL_OP_FILL);
   double *o = lean_float_array_cptr(out);
   for (size_t i = 0; i < n; ++i) {
     o[i] = v;
   }
+  tl_note_time(TL_OP_FILL, tl_t0);
   return out;
 }
 

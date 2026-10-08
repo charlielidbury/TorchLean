@@ -58,6 +58,32 @@ def constFast {α : Type u} [Storage α] {s : Shape} (a : α) :
     TorchLean.Tensor.Internal.Rep α s :=
   TorchLean.Tensor.Internal.Rep.const a
 
+/-- Compiled implementation of `fullFast`. -/
+unsafe def fullImpl {α : Type} [storage : Storage α] (shape : Shape)
+    (value : α) : Tensor α shape :=
+  if floatStorage storage then
+    ofFloatBuffer (fillNative shape.size.toUSize value)
+  else TorchLean.Tensor.full shape value
+
+/-- `Tensor.full`, compiled through `fullImpl`. -/
+@[implemented_by fullImpl]
+def fullFast {α : Type} [Storage α] (shape : Shape) (value : α) :
+    Tensor α shape :=
+  TorchLean.Tensor.full shape value
+
+/-- Compiled implementation of `replicateFast`. -/
+unsafe def replicateImpl {α : Type} [storage : Storage α] {shape : Shape}
+    (t : Tensor α .scalar) : Tensor α shape :=
+  if floatStorage storage then
+    ofFloatBuffer (fillNative shape.size.toUSize t.item)
+  else Spec.replicate t
+
+/-- `Spec.replicate`, compiled through `replicateImpl`. -/
+@[implemented_by replicateImpl]
+def replicateFast {α : Type} [Storage α] {shape : Shape}
+    (t : Tensor α .scalar) : Tensor α shape :=
+  Spec.replicate t
+
 /-- Compiled implementation of `broadcastToFast`. -/
 unsafe def broadcastToImpl {α : Type} [storage : Storage α] {s₁ s₂ : Shape}
     (h : Shape.CanBroadcastTo s₁ s₂) (t : Tensor α s₁) : Tensor α s₂ :=
@@ -116,6 +142,10 @@ def swapAdjacentAxesFast {β : Type} [Storage β] {shape : Shape}
 /-- Compile constant tensors through the native fill. -/
 @[csimp] theorem const_eq_fast :
     @TorchLean.Tensor.Internal.Rep.const = @constFast := rfl
+/-- Compile `Tensor.full` through the native fill. -/
+@[csimp] theorem full_eq_fast : @TorchLean.Tensor.full = @fullFast := rfl
+/-- Compile `Spec.replicate` through the native fill. -/
+@[csimp] theorem replicate_eq_fast : @Spec.replicate = @replicateFast := rfl
 /-- Compile `broadcastTo` through the native dispatcher. -/
 @[csimp] theorem broadcastTo_eq_fast :
     @TorchLean.Tensor.broadcastTo = @broadcastToFast := rfl
