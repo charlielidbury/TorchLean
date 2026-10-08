@@ -96,6 +96,30 @@ target torchlean_tensor_cpu_object pkg : FilePath := do
   compilerJob.bindM fun compiler =>
     buildO oFile srcJob #["-I", lean.includeDir.toString] #["-O3", "-fPIC"] compiler getLeanTrace
 
+/--
+fastcpu: multithreaded native `Float` kernels that keep the specifications' operation order
+(`NN.Runtime.FastCpu`). `-ffp-contract=off` keeps every product and sum separately rounded.
+-/
+target torchlean_fastcpu_object pkg : FilePath := do
+  let lean ← getLeanInstall
+  let srcJob ← inputFile
+    (pkg.dir / "csrc/cpu/torchlean_fastcpu.c") false
+  let oFile := pkg.buildDir / "torchlean_fastcpu.o"
+  let compilerJob ← nativeCompilerJob "cc"
+  compilerJob.bindM fun compiler =>
+    buildO oFile srcJob #["-I", lean.includeDir.toString]
+      #["-O3", "-fPIC", "-ffp-contract=off", "-pthread"] compiler getLeanTrace
+
+/--
+fastcpu kernels for compiled executables only. They are deliberately not part of the
+`torchlean_tensor_cpu_shared` dynlib: every module's trace includes that library, so editing
+`torchlean_fastcpu.c` there would rebuild all of TorchLean. The interpreter (`#eval`) therefore
+cannot run the native dispatchers; compiled code can.
+-/
+target torchlean_fastcpu pkg : FilePath := do
+  let oJob ← torchlean_fastcpu_object.fetch
+  buildStaticLib (pkg.buildDir / nameToStaticLib "torchlean_fastcpu") #[oJob]
+
 /-- Packed host tensor primitives linked into compiled executables. -/
 target torchlean_tensor_cpu pkg : FilePath := do
   let oJob ← torchlean_tensor_cpu_object.fetch
@@ -143,7 +167,7 @@ target torchlean_allocator pkg : FilePath := do
 lean_lib NN where
   moreLinkObjs :=
     (if Platform.isLinux then (#[torchlean_allocator] : TargetArray FilePath) else #[]) ++
-    (#[torchlean_tensor_cpu] : TargetArray FilePath) ++
+    (#[torchlean_tensor_cpu, torchlean_fastcpu] : TargetArray FilePath) ++
       if cudaEnabled then
         (#[torchlean_libtorch] : TargetArray FilePath)
       else
@@ -198,6 +222,11 @@ lean_exe torchlean_lint where
 -- Build with `scripts/lake.sh -Kcuda=true build` before passing `--device cuda` to an example.
 lean_exe torchlean where
   root := `NN.Examples.RunnerMain
+
+-- fastcpu fork: eager CPU micro-benchmark (`lake exe fastcpu_bench mm 28800 96 96`).
+lean_exe fastcpu_bench where
+  srcDir := "bench"
+  root := `FastCpuBench
 
 -- Shared executable numerical formats and refinement proofs.
 require floatlib from git
