@@ -1241,6 +1241,12 @@ static void tl_swap_task(void *ctx, size_t task) {
   size_t o = task / job->b, j = task % job->b;
   const double *in = job->in + o * job->a * job->b * job->inner;
   double *out = job->out + (o * job->b + j) * job->a * job->inner;
+  if (job->inner == 1) { /* swapping the last two axes: a strided gather */
+    for (size_t i = 0; i < job->a; ++i) {
+      out[i] = in[i * job->b + j];
+    }
+    return;
+  }
   for (size_t i = 0; i < job->a; ++i) {
     memcpy(out + i * job->inner, in + (i * job->b + j) * job->inner,
            job->inner * sizeof(double));
