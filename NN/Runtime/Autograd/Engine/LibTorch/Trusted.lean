@@ -52,7 +52,7 @@ and numerical parity tests provide evidence for a particular build and set of in
   Lean composes attention in `LibTorch.Ops.Attention` and retains Q/K/V and probability buffers
   on its tape; the native buffer has no attention context.
   LibTorch owns the CUDA allocator; TorchLean's payload counters track logical ownership.
-  The `LibTorch.DGemm` interface accepts binary64 host arrays; eager CUDA buffers remain binary32.
+  Native buffers carry binary32 or binary64 according to the executable scalar type.
 
 - `csrc/libtorch/operations.h`
   Common operation list used to generate LibTorch exports and unavailable-build signatures.
@@ -73,8 +73,20 @@ namespace Runtime
 namespace Autograd
 namespace LibTorch
 
+/-- Native real storage supported by the tape. This is independent of tensor shape and device.
+Configured software arithmetic uses its own execution path, not a narrowing native conversion. -/
+inductive Dtype where
+  | float32
+  | float64
+  deriving Repr, DecidableEq, BEq, Nonempty
+
+/-- Bytes per native scalar, also used by checkpoint framing. -/
+def Dtype.bytes : Dtype → Nat
+  | .float32 => 4
+  | .float64 => 8
+
 /--
-Opaque handle to a contiguous float32 CUDA buffer, implemented in `csrc/libtorch/torchlean.cpp`.
+Opaque handle to a contiguous, dtype-carrying CUDA buffer in `csrc/libtorch/torchlean.cpp`.
 Builds without `-K cuda=true` cannot create one.
 -/
 opaque BufferImpl : NonemptyType.{0}

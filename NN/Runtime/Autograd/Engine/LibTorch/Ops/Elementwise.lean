@@ -37,7 +37,7 @@ returned buffers are owned by the tape/gradient accumulator; workspace buffers a
     (forward := Buffer.add)
     (backward := fun _a _b dLdy =>
       let da := Buffer.copy dLdy
-      let zeros := Buffer.zeros (Buffer.size dLdy)
+      let zeros := Buffer.zeros (Buffer.size dLdy) (Buffer.dtype dLdy)
       let dbRaw := Buffer.axpy zeros dLdy 1.0
       let db := Buffer.releaseThen zeros dbRaw
       (da, db))
@@ -171,13 +171,13 @@ inputs.
   let n ← AnyBuffer.numelU32 s
   unary (t := t) "safe_log" xId s s
     (forward := fun x =>
-      let epsBuf := Buffer.full n ε
+      let epsBuf := Buffer.full n ε (Buffer.dtype x)
       let sp := softplusBuf x n
       let denom := Buffer.add sp epsBuf
       let y := Buffer.log denom
       Buffer.releaseThen epsBuf <| Buffer.releaseThen sp <| Buffer.releaseThen denom y)
     (backward := fun x dLdy =>
-      let epsBuf := Buffer.full n ε
+      let epsBuf := Buffer.full n ε (Buffer.dtype x)
       let sp := softplusBuf x n
       let denom := Buffer.add sp epsBuf
       let sig := Buffer.sigmoid x
@@ -192,7 +192,7 @@ inputs.
     (forward := Buffer.sigmoid)
     (backward := fun x dLdy =>
       let y := Buffer.sigmoid x
-      let ones := Buffer.full n 1.0
+      let ones := Buffer.full n 1.0 (Buffer.dtype x)
       let oneMinusY := Buffer.sub ones y
       let dy := Buffer.mul y oneMinusY
       Buffer.releaseThen y <| Buffer.releaseThen ones <| Buffer.releaseThen oneMinusY <|
@@ -205,7 +205,7 @@ inputs.
     (forward := Buffer.tanh)
     (backward := fun x dLdy =>
       let y := Buffer.tanh x
-      let ones := Buffer.full n 1.0
+      let ones := Buffer.full n 1.0 (Buffer.dtype x)
       let y2 := Buffer.mul y y
       let dy := Buffer.sub ones y2
       Buffer.releaseThen y <| Buffer.releaseThen ones <| Buffer.releaseThen y2 <|

@@ -290,7 +290,7 @@ def inv {α : Type} [TorchLean.Storage α] (s : EagerSession α) [Context α]
 Record `log(softplus(x) + ε)` and its derivative.
 
 Backward multiplies the incoming gradient by `sigmoid(x) / (softplus(x) + ε)`. CUDA converts
-`ε` to binary32; choose a value that stays positive after conversion if softplus can round to
+`ε` to the input dtype; choose a value that stays positive after conversion if softplus can round to
 zero. Neither backend checks positivity here or guarantees finite results for nonfinite inputs.
 -/
 def safeLog {α : Type} [TorchLean.Storage α] [TensorTransfer α] (s : EagerSession α)

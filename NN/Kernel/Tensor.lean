@@ -10,15 +10,13 @@ public import NN.Kernel.Program
 public import NN.Kernel.Runtime
 public import NN.Tensor.Constructors
 public import NN.API.Arguments
-public import NN.Runtime.Autograd.Engine.LibTorch.Convert
-public import NN.Runtime.Autograd.Torch.Core.TensorTransfer
 
 /-!
 # Custom operations on tensors
 
 Inputs use the public `Arguments` container for shape-indexed tensors. The pure evaluator uses
-checked row-major reads and stops at the first failure. Native execution uses the tensor transfer
-capability; host arrays remain an implementation detail of the LibTorch bridge.
+checked row-major reads and stops at the first failure. Native execution transfers complete scalar
+words; byte arrays remain an implementation detail of the LibTorch bridge.
 -/
 
 @[expose] public section
@@ -108,35 +106,55 @@ theorem Program.eval_eq_reference {α : Type} [Storage α] {shapes : List Shape}
 
 namespace Internal
 
-/-- Transfer heterogeneous tensors using the runtime's existing scalar conversion capability. -/
-private def upload {α : Type} [Storage α] [Runtime.Autograd.Torch.TensorTransfer α] :
-    {shapes : List Shape} → TensorPack α shapes → Array FloatArray → IO (Array FloatArray)
-  | [], .nil, values => pure values
-  | _ :: _, .cons first rest, values => do
-      let tensor ← Runtime.Autograd.Torch.TensorTransfer.toFloatTensor first
-      upload rest (values.push (Runtime.Autograd.LibTorch.Convert.flattenFloat tensor))
+/-- Serialize complete words in little-endian order, including exceptional-value metadata. -/
+private def upload {α : Type} [Storage α] (scalar : Scalar α) :
+    {shapes : List Shape} → TensorPack α shapes → Array ByteArray → Except String (Array ByteArray)
+  | [], .nil, values => .ok values
+  | shape :: _, .cons first rest, values => do
+      let mut bytes := ByteArray.empty
+      for h : i in [:shape.size] do
+        let bits := scalar.encode (Tensor.Internal.Rep.getFlat first
+          ⟨i, by simpa only [Shape.internalSize_eq] using h.upper⟩)
+        unless bits < 2 ^ (8 * scalar.precision.bytes) do
+          throw "custom computation: input encoding exceeds the scalar byte width"
+        for j in [:scalar.precision.bytes] do
+          bytes := bytes.push ((bits >>> (8 * j)) % 256).toUInt8
+      upload scalar rest (values.push bytes)
+
+/-- Reconstruct a scalar's full word, not an approximate binary64 observation. -/
+private def decode (bytes : ByteArray) (width index : Nat) : Nat := Id.run do
+  let mut bits := 0
+  for j in [:width] do
+    bits := bits + (bytes.get! (index * width + j)).toNat * 2 ^ (8 * j)
+  return bits
 
 end Internal
 
 /-- Execute a custom operation on the selected device, retaining the requested output shape.
 
-CPU uses the Lean evaluator; GPU uses generated CUDA. Other devices are rejected, without a hidden
-fallback. Native code, transfers, NVRTC and GPU execution remain external trust boundaries.
+CPU uses the Lean evaluator; GPU uses generated CUDA. A format outside the GPU implementation's
+limits uses the same Lean evaluator with a diagnostic, without changing precision. Other devices
+and operational failures are rejected. Native execution remains an external trust boundary.
 -/
 @[no_expose] def Program.run {α : Type} [Storage α]
-    [Runtime.Autograd.Torch.TensorTransfer α] {shapes : List Shape} (program : Program α)
+    {shapes : List Shape} (program : Program α)
     (inputs : Arguments α shapes) (shape : Shape)
     (device : NN.Backend.Device := cpu) : IO (Tensor α shape) := do
   if device == cpu then
     return ← IO.ofExcept (program.eval inputs shape |>.mapError reprStr)
   if device != gpu then
     throw (IO.userError s!"custom operation: device {device.cliName} is unsupported")
+  if !program.scalar.precision.supportsGpu then
+    IO.eprintln "custom computation: this scalar format is CPU-only; keeping its precision on CPU"
+    return ← IO.ofExcept (program.eval inputs shape |>.mapError reprStr)
   if shape.size > 2 ^ 63 - 1 then
     throw (IO.userError s!"kernel: output size {shape.size} exceeds native tensor addressing")
-  let values ← Internal.runHost program.format program.bits program.expression
-    (← Internal.upload (Arguments.Internal.toTensorPack inputs) #[]) shape.size.toUInt64
-  let some tensor := Runtime.Autograd.LibTorch.Convert.unflattenFloat? (s := shape) values |
-    throw (IO.userError s!"kernel: expected {shape.size} outputs, received {values.size}")
-  Runtime.Autograd.Torch.TensorTransfer.ofFloatTensor tensor
+  let inputs ← IO.ofExcept
+    (Internal.upload program.scalar (Arguments.Internal.toTensorPack inputs) #[])
+  let values ← Internal.runBytes program.scalar program.expression inputs shape.size.toUInt64
+  let width := program.scalar.precision.bytes
+  unless values.size == shape.size * width do
+    throw (IO.userError s!"kernel: expected {shape.size * width} bytes, received {values.size}")
+  return Tensor.generateFlat shape fun i => program.scalar.decode (Internal.decode values width i)
 
 end NN.Kernel

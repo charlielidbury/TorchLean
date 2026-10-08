@@ -10,9 +10,9 @@ public import NN.Runtime.Autograd.Engine.LibTorch.Controls
 public import NN.Runtime.Autograd.Engine.LibTorch.Trusted
 
 /-!
-# CUDA Float32 Buffers
+# CUDA Buffers
 
-Low-level float32 tensor operations for the LibTorch CUDA runtime. TorchLean retains its tape and
+Low-level dtype-preserving operations for the LibTorch CUDA runtime. TorchLean retains its tape and
 selected local VJPs; native calls do not record a LibTorch autograd graph. CUDA builds use
 `csrc/libtorch/torchlean.cpp`. Builds without LibTorch link `csrc/libtorch/unavailable.c`, which
 reports `.notLinked` and fails every buffer operation.
@@ -25,6 +25,10 @@ namespace Autograd
 namespace LibTorch
 
 namespace Buffer
+
+/-- Scalar representation retained by a live native buffer. Released handles must not be read. -/
+@[never_extract, extern "torchlean_cuda_buffer_dtype"]
+opaque dtype (b : @& Buffer) : Dtype
 
 /-! ### Runtime Availability -/
 
@@ -145,7 +149,7 @@ limit.
 The fields are read separately. A snapshot can include concurrent allocator activity and should
 not be treated as an atomic account of every allocation in the process.
 -/
-structure AllocatorStats where
+structure Memory where
   liveBytes : UInt64
   peakBytes : UInt64
   allocCount : UInt64
@@ -163,13 +167,13 @@ structure AllocatorStats where
 deriving Repr
 
 /--
-Read the current CUDA allocator counters.
+Read current memory usage and buffer ownership counters.
 
 Each read is sequenced at this point in `IO`, including repeated calls in a loop. The native reads
 stay inside the action rather than constructing a record that Lean could retain from an earlier
 call. Applications do not need a step counter or another changing argument to obtain fresh values.
 -/
-@[no_expose] def allocatorStats : IO AllocatorStats :=
+@[no_expose] def memory : IO Memory :=
   IO.lazyPure fun _ =>
     { liveBytes := allocatorLiveBytesRaw 0
       peakBytes := allocatorPeakBytesRaw 0
@@ -192,7 +196,7 @@ call. Applications do not need a step counter or another changing argument to ob
   toString mib ++ " MiB"
 
 /-- One-line allocator report distinguishing logical payloads from native storage. -/
-@[no_expose] def AllocatorStats.format (s : AllocatorStats) : String :=
+@[no_expose] def Memory.format (s : Memory) : String :=
   "payload=" ++ mibString s.liveBytes ++
   " payload_peak=" ++ mibString s.peakBytes ++
   " allocs=" ++ toString s.allocCount ++
@@ -209,17 +213,17 @@ call. Applications do not need a step counter or another changing argument to ob
   " peak_reserved=" ++ mibString s.peakReservedBytes
 
 /--
-Create a device buffer by copying from a host `FloatArray` (casts each element to float32).
+Create a device buffer by copying from a host `FloatArray` in the requested dtype.
 
 This primitive has a pure Lean type, but the native implementation allocates a fresh device buffer.
 Runtime code should use `ofFloatArrayIO`: each call allocates a distinct buffer, and ordinary device
 exhaustion is returned as an IO error that the caller can handle.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_of_float_array"]
-opaque ofFloatArray (a : @& FloatArray) : Buffer
+opaque ofFloatArray (a : @& FloatArray) (dtype : Dtype := .float32) : Buffer
 
 /--
-Copy a host `FloatArray` into a fresh device buffer, rounding each element to float32.
+Copy a host `FloatArray` into a fresh device buffer in the requested dtype.
 
 The upload runs at this point in the IO sequence. Repeated calls with the same host array allocate
 distinct buffers, so releasing one does not invalidate another. Native allocation failures return
@@ -227,9 +231,9 @@ distinct buffers, so releasing one does not invalidate another. Native allocatio
 existing device buffers remain owned by the caller.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_of_float_array_io"]
-opaque ofFloatArrayIO (a : @& FloatArray) : IO Buffer
+opaque ofFloatArrayIO (a : @& FloatArray) (dtype : Dtype := .float32) : IO Buffer
 
-/-- Copy a buffer back to a host `FloatArray` (casts float32 elements to `Float`). -/
+/-- Copy a buffer back to a host `FloatArray`, widening binary32 when needed. -/
 @[never_extract, extern "torchlean_cuda_buffer_to_float_array"]
 opaque toFloatArray (b : @& Buffer) : FloatArray
 
@@ -238,26 +242,30 @@ opaque toFloatArray (b : @& Buffer) : FloatArray
 opaque toFloatArrayIO (b : @& Buffer) : IO FloatArray
 
 /--
-Copy a buffer to its raw float32 byte representation.
+Copy a buffer to little-endian scalar words. By default its dtype is preserved; an explicit
+different dtype requests conversion, as when exporting a legacy binary32 checkpoint.
 
 This is primarily used by streaming checkpoints. Unlike `toFloatArrayIO`, it does not widen every
 element to Lean `Float`, so a large CUDA parameter can be written without constructing a second
-double-precision host array.
+double-precision host array for binary32 data.
 -/
-@[never_extract, extern "torchlean_cuda_buffer_to_float32_bytes_io"]
-opaque toFloat32BytesIO (b : @& Buffer) : IO ByteArray
+@[never_extract, extern "torchlean_cuda_buffer_to_bytes_io"]
+opaque toBytesIO (b : @& Buffer) (dtype : Dtype := Buffer.dtype b) : IO ByteArray
 
 /--
-Upload a raw float32 byte payload to a fresh device buffer.
+Upload little-endian scalar words to a fresh device buffer.
 
-Checkpoint values retain their float32 representation. Native allocation failures return
+`source` describes the payload; `dtype` selects storage. They agree by default. A different
+source is an explicit conversion, used to load legacy binary32 files into binary64 storage.
+Native allocation failures return
 `IO.Error.resourceExhausted` before a buffer is returned. The borrowed byte payload remains
 available to the caller.
 -/
-@[never_extract, extern "torchlean_cuda_buffer_of_float32_bytes_io"]
-opaque ofFloat32BytesIO (bytes : @& ByteArray) : IO Buffer
+@[never_extract, extern "torchlean_cuda_buffer_of_bytes_io"]
+opaque ofBytesIO (bytes : @& ByteArray) (dtype : Dtype := .float32)
+    (source : Dtype := dtype) : IO Buffer
 
-/-- Number of float32 elements in the buffer. -/
+/-- Number of scalar elements in the buffer, independently of dtype. -/
 @[never_extract, extern "torchlean_cuda_buffer_size"]
 opaque size (b : @& Buffer) : UInt32
 
@@ -350,7 +358,7 @@ by their sessions.
 
 /-- Allocate a length-`n` buffer filled with zeros. -/
 @[never_extract, extern "torchlean_cuda_buffer_zeros"]
-opaque zeros (n : UInt32) : Buffer
+opaque zeros (n : UInt32) (dtype : Dtype := .float32) : Buffer
 
 /--
 Allocate a fresh zero-filled buffer inside `IO` code.
@@ -364,20 +372,20 @@ The allocating IO constructors share this error boundary. Pure allocation and ke
 have their own native failure policy.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_zeros_io"]
-opaque zerosIO (n : UInt32) : IO Buffer
+opaque zerosIO (n : UInt32) (dtype : Dtype := .float32) : IO Buffer
 
-/-- Allocate a length-`n` buffer filled with `v` (host `Float`, cast to float32). -/
+/-- Allocate a length-`n` buffer filled with `v`, rounded in the requested dtype. -/
 @[never_extract, extern "torchlean_cuda_buffer_full"]
-opaque full (n : UInt32) (v : Float) : Buffer
+opaque full (n : UInt32) (v : Float) (dtype : Dtype := .float32) : Buffer
 
 /--
-Allocate a fresh length-`n` buffer filled with `v`, rounded to float32.
+Allocate a fresh length-`n` buffer filled with `v`, rounded in the requested dtype.
 
 Each call owns a distinct buffer. Native allocation failures return `IO.Error.resourceExhausted`,
 as in `zerosIO`.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_full_io"]
-opaque fullIO (n : UInt32) (v : Float) : IO Buffer
+opaque fullIO (n : UInt32) (v : Float) (dtype : Dtype := .float32) : IO Buffer
 
 /-!
 ### Deterministic RNG (device-side)
@@ -389,9 +397,9 @@ They use the same SplitMix64-style mixing as `TorchLean.Random` so results are
 deterministic given `(seed, counter)` and a row-major linear index.
 -/
 
-/-- Deterministic `U[0,1)` generator: returns a length-`n` buffer (float32) keyed by `key`. -/
+/-- Deterministic `U[0,1)` generator in the requested dtype, keyed by `key`. -/
 @[never_extract, extern "torchlean_cuda_buffer_rand_uniform"]
-opaque randUniform (n : UInt32) (key : UInt64) : Buffer
+opaque randUniform (n : UInt32) (key : UInt64) (dtype : Dtype := .float32) : Buffer
 
 /--
 Generate the deterministic values of `randUniform` in a fresh buffer.
@@ -400,15 +408,17 @@ The key determines the values; repeated calls still allocate distinct buffers. N
 failures return `IO.Error.resourceExhausted`, as in `zerosIO`.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_rand_uniform_io"]
-opaque randUniformIO (n : UInt32) (key : UInt64) : IO Buffer
+opaque randUniformIO (n : UInt32) (key : UInt64) (dtype : Dtype := .float32) : IO Buffer
 
 /-- Deterministic normal generator using Box-Muller on the device. -/
 @[never_extract, extern "torchlean_cuda_buffer_rand_normal"]
-opaque randNormal (n : UInt32) (mean std : Float) (key : UInt64) : Buffer
+opaque randNormal (n : UInt32) (mean std : Float) (key : UInt64)
+    (dtype : Dtype := .float32) : Buffer
 
 /-- Deterministic `{0,1}` mask generator: returns a length-`n` buffer keyed by `key`. -/
 @[never_extract, extern "torchlean_cuda_buffer_bernoulli_mask"]
-opaque bernoulliMask (n : UInt32) (keepProb : Float) (key : UInt64) : Buffer
+opaque bernoulliMask (n : UInt32) (keepProb : Float) (key : UInt64)
+    (dtype : Dtype := .float32) : Buffer
 
 /--
 Generate the deterministic mask of `bernoulliMask` in a fresh buffer.
@@ -417,7 +427,8 @@ The probability and key retain the pure primitive's meaning. Each call allocates
 with the allocation error boundary of `zerosIO`.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_bernoulli_mask_io"]
-opaque bernoulliMaskIO (n : UInt32) (keepProb : Float) (key : UInt64) : IO Buffer
+opaque bernoulliMaskIO (n : UInt32) (keepProb : Float) (key : UInt64)
+    (dtype : Dtype := .float32) : IO Buffer
 
 /-- Absolute value applied pointwise to a CUDA buffer. -/
 @[never_extract, extern "torchlean_cuda_buffer_abs"]
@@ -447,7 +458,7 @@ opaque sqrtBwd (x dLdy : @& Buffer) : Buffer
 opaque exp (b : @& Buffer) : Buffer
 
 /--
-Elementwise sine of angles in radians, returning a new float32 buffer.
+Elementwise sine of angles in radians, retaining the input dtype.
 
 The native implementation uses `at::sin`. The input is borrowed, so the tape can
 retain it for the cosine factor in the backward pass.
@@ -456,7 +467,7 @@ retain it for the cosine factor in the backward pass.
 opaque sin (b : @& Buffer) : Buffer
 
 /--
-Elementwise cosine of angles in radians, returning a new float32 buffer and borrowing its input.
+Elementwise cosine of angles in radians, retaining the input dtype and borrowing its input.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_cos"]
 opaque cos (b : @& Buffer) : Buffer
@@ -527,16 +538,16 @@ opaque relu (b : @& Buffer) : Buffer
 opaque reluBwd (x dLdy : @& Buffer) : Buffer
 
 /--
-Elementwise logistic sigmoid through `at::sigmoid`, returning a new float32 buffer.
+Elementwise logistic sigmoid through `at::sigmoid`, retaining the input dtype.
 
 The input is borrowed; TorchLean's tape owns the `y * (1 - y)` derivative. Values follow ATen's
-float32 rounding and saturation, including zero when the negative-tail exponential overflows.
+rounding and saturation in that dtype, including zero when the negative-tail exponential overflows.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_sigmoid"]
 opaque sigmoid (x : @& Buffer) : Buffer
 
 /--
-Elementwise hyperbolic tangent through `at::tanh`, returning a new float32 buffer.
+Elementwise hyperbolic tangent through `at::tanh`, retaining the input dtype.
 
 Direct evaluation avoids cancellation near zero and preserves signed zero. The input is borrowed;
 TorchLean's tape owns the `1 - y * y` derivative.
@@ -566,7 +577,7 @@ opaque sub (a b : @& Buffer) : Buffer
 opaque mul (a b : @& Buffer) : Buffer
 
 /--
-Multiply each element by a scalar `c` (host `Float`, cast to float32).
+Multiply each element by a scalar `c`, rounded in the buffer dtype.
 
 This is a primitive building block for many ops (e.g. scaling gradients).
 -/
@@ -587,7 +598,7 @@ reorder the two lifetime events. Use this at ownership-transfer boundaries in th
 opaque copyAndRelease (b : @& Buffer) : Buffer
 
 /--
-Fused multiply-add: `a + c * b` (sizes must match; `c` is a host `Float`, cast to float32).
+Fused multiply-add: `a + c * b` (sizes and dtypes must match; `c` is rounded in that dtype).
 
 This is the classic BLAS-style `axpy` primitive and is useful for optimizers and bias-like updates.
 -/
@@ -602,7 +613,7 @@ The result is `(parameters, firstMoment, secondMoment)`. Passing `decay = 0` giv
 computes the two bias-correction scales from the step counter, exactly as in `Optim.Adam.update`
 and `Optim.AdamW.update`.
 
-The caller must validate that `epsilon` remains finite and positive after conversion to float32.
+The caller must validate that `epsilon` remains finite and positive in the parameter dtype.
 The native eager optimizer and its checkpoint reader share that validation.
 
 TorchLean's optimizer definitions specify the update. The native bridge evaluates the pointwise
@@ -620,7 +631,7 @@ opaque adamStep
 Scaled product exponential: `exp((c * x) * y)`.
 
 LibTorch evaluates the two multiplications followed by the exponential. `c` is a host `Float`
-cast to float32; `x` and `y` are equal-length buffers.
+rounded in the buffer dtype; `x` and `y` have equal lengths and dtypes.
 -/
 @[never_extract, extern "torchlean_cuda_buffer_scaled_prod_exp"]
 opaque scaledProdExp (x y : @& Buffer) (c : Float) : Buffer

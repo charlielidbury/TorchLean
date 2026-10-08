@@ -2,10 +2,6 @@
 title: Updates
 ---
 
-These notes record what changed at the time. Older entries describe earlier APIs and backends;
-use the [installation page]({{ '/installation/' | relative_url }}) and
-[guide]({{ '/blueprint/' | relative_url }}) for the current setup.
-
 <nav class="timeline-nav" aria-label="TorchLean update timeline">
   <a href="#october-2026-custom-computations">Custom computations</a>
   <a href="#september-2026-libtorch">LibTorch backend</a>
@@ -48,16 +44,29 @@ def input : Tensor Float32 [3] := [1, 2, 3]
 def onGpu := square.run input (device := gpu)
 ```
 
-CPU is the default and evaluates the original Lean function. GPU supports FP32 and FP64 scalar
-arithmetic, comparisons, local bindings and conditionals. For calculations that read several
-tensors or sum entries in a particular order, `Program.of` supports indexed reads and bounded
-folds. Unsupported GPU calculations return an error; we don't silently run them on CPU.
+CPU is the default and evaluates the original Lean function. GPU supports native FP32/FP64 and
+FloatLib's configured binary formats, including binary128. Compatible native arithmetic is selected
+by the full format and operation; other supported binary formats use integer-limb arithmetic.
+Runtime parameters, local bindings, comparisons, conditionals and `f.zip` use the same tensor API.
+`Program.of` also supports indexed reads, ordered bounded folds and fixed-parameter numerical
+recurrences. CPU-only scalar types or formats keep their precision on CPU with a diagnostic.
+Unsupported code for a GPU-capable type and execution failures still return errors.
 
 The frontend produces a typed expression with a Lean proof that it agrees with our function.
 We also prove correspondence through lowering and the generated source grammar, under explicit
 arithmetic and buffer contracts. NVRTC compilation and GPU execution still depend on NVIDIA's
-toolchain and hardware. Standard model operations continue to use LibTorch, and custom backward
-rules need their own implementation and proof.
+toolchain and hardware. Configured CUDA arithmetic has differential checks against FloatLib, not
+a new kernel proof of GPU instructions. Standard model operations continue to use LibTorch.
+
+We can now keep an ordinary function definition and write `f.run input (grad := true)` when we
+want its gradient. This works for supported scalar arithmetic and whole-tensor functions, including
+sums and matrix products. The result gives us the forward value and `backward`; shapes and storage
+come from the input. We reuse the existing tape and local derivative rules, and check the translated
+operation recipe against the function. Captured tensors stay constant, and the element type stays generic.
+The GPU tape now keeps the input dtype: `Float32` uses binary32 and `Float` uses binary64,
+through saved values, gradients and optimizer state. Binary64 checkpoints retain those digits too.
+Configured carriers use CPU without narrowing. Whole-tensor GPU calls follow the same precision
+policy. Arbitrary indexed bodies still need a faithful recorded derivative implementation.
 
 We shortened the settings users write too: `open TorchLean` exposes `cpu`, `gpu`, `native`,
 `ieee`, `eager` and `typedGraph`. Input directions for higher derivatives now form one tensor,
@@ -126,7 +135,7 @@ Several native features were removed rather than ported:
 | Removed | Use instead |
 | --- | --- |
 | `Buffer.setDeterministicReductions` | `Runtime.Autograd.LibTorch.setDeterministic` |
-| `TORCHLEAN_CUDA_CACHE_CAP_BYTES`, `AllocatorStats.cacheBytes` and `cacheCapBytes` | `AllocatorStats.allocatedBytes` and `reservedBytes`, with `Runtime.Autograd.LibTorch.setMemoryFraction` and `Runtime.Autograd.LibTorch.emptyCache`. The limit is now a fraction of device memory, not a byte cap. |
+| `TORCHLEAN_CUDA_CACHE_CAP_BYTES`, `AllocatorStats.cacheBytes` and `cacheCapBytes` | `Buffer.memory` reports `allocatedBytes` and `reservedBytes`, with `Runtime.Autograd.LibTorch.setMemoryFraction` and `Runtime.Autograd.LibTorch.emptyCache`. The limit is now a fraction of device memory, not a byte cap. |
 | `flashAttentionFwd`/`Bwd` and native attention contexts | `Buffer.attentionForward`/`attentionBackward`, composed in Lean with tape-owned saved buffers |
 | `broadcastRowToRows`, `gatherVec`, `reduceSumByColumn` | The corresponding ATen operations behind the existing buffer API |
 | Fused FNO forward/backward externs | Lean composition of FFT, frequency mixing, and inverse FFT using numerical primitives |
@@ -167,9 +176,6 @@ the chosen scalar in supervised samples, predictions, loss, reports, and checkpo
 sessions run on CPU, reject custom backend profiles, and do not expose `Result.verify`.
 Initialization and optimizer settings still enter through `Float`. The ordinary trainer's `.ieee`
 option remains fixed to binary32.
-The eager LibTorch CUDA backend uses binary32 buffers; the separate matrix-product interface uses
-binary64. Configurable FloatLib precision runs on the typed CPU path.
-
 The numerical proofs distinguish rounded trees from exact accumulation followed by one final
 rounding. Their intermediate values can differ, so an error theorem for one does not justify the
 other. Native Float32 import/export and arithmetic proofs now come directly from FloatLib:
@@ -185,8 +191,7 @@ lifts and backend contracts. Its numerical graph certificates still use binary32
 broader scalar interval API does not change that certificate format.
 
 The [floating-point chapter]({{ '/blueprint/Floating-Point-and-Native-Boundaries/Floating-Point-Semantics/' | relative_url }})
-explains the scalar API and numerical proofs. Older entries below describe the implementations
-we used at the time.
+explains the scalar API and numerical proofs.
 
   </div>
 </article>

@@ -74,7 +74,7 @@ def capsule
         evidence := .runtimeGuard "LibTorch bridge size/rank checks at the Lean/native boundary" }
     layoutContract :=
       { claim := .layoutCompatibility op .libTorchCudaView
-        summary := "CUDA buffers contain contiguous row-major LibTorch float32 tensors."
+        summary := "CUDA buffers retain their dtype in contiguous row-major LibTorch tensors."
         evidence := .runtimeGuard
           "LibTorch bridge dtype, device, contiguity, and element-count checks" }
     valueContract :=

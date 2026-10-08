@@ -7,6 +7,7 @@ Authors: TorchLean Team
 module
 
 public import FloatLib.Floats.Formats.IEEE754.Native
+public import NN.Runtime.Autograd.Engine.LibTorch.Trusted
 public import NN.Spec.Core.Tensor.Core
 
 /-!
@@ -34,6 +35,10 @@ element to be inspected as `Float` without claiming that a native tensor has the
 storage representation.
 -/
 class TensorTransfer (α : Type) [TorchLean.Storage α] where
+  /-- Native dtype, when this carrier can use the existing native tensor runtime.
+  The default keeps custom scalar types on CPU rather than narrowing them through `Float`.
+  This does not test device availability or certify native arithmetic. -/
+  dtype? : Option Runtime.Autograd.LibTorch.Dtype := none
   /-- Encode a tensor in the host representation used by native runtimes. -/
   toFloatTensor : {s : Shape} → Tensor α s → IO (Tensor Float s)
   /-- Decode a tensor received from a native runtime without changing its shape. -/
@@ -43,14 +48,28 @@ class TensorTransfer (α : Type) [TorchLean.Storage α] where
   /-- Read a tensor for host-side inspection without claiming a native storage representation. -/
   readFloatTensor : {s : Shape} → Tensor α s → IO (Tensor Float s) := toFloatTensor
 
-/-- `Float` transfers preserve the runtime's host representation. -/
+/-- Whether a scalar has a native tape representation. Device availability is checked separately. -/
+def TensorTransfer.supportsGpu {α : Type} [Storage α] [TensorTransfer α] : Bool :=
+  (TensorTransfer.dtype? (α := α)).isSome
+
+/-- Native dtype required at a transfer boundary; unsupported carriers must stay on CPU. -/
+def TensorTransfer.dtype {α : Type} [Storage α] [TensorTransfer α] :
+    IO Runtime.Autograd.LibTorch.Dtype :=
+  match TensorTransfer.dtype? (α := α) with
+  | some dtype => pure dtype
+  | none => throw <| IO.userError
+      "torch: this scalar has no native tensor representation; run it on CPU"
+
+/-- `Float` retains binary64 on the native tape, without an intermediate binary32 conversion. -/
 instance (priority := 1000) : TensorTransfer Float where
+  dtype? := some .float64
   toFloatTensor := fun tensor => pure tensor
   ofFloatTensor := fun tensor => pure tensor
   toFloat := pure
 
 /-- Native binary32 transfers preserve the runtime's float32 wire representation. -/
 instance (priority := 1000) : TensorTransfer Float32 where
+  dtype? := some .float32
   toFloatTensor := fun tensor => pure (TorchLean.Tensor.map Float32.toFloat tensor)
   ofFloatTensor := fun tensor => pure (TorchLean.Tensor.map Float.toFloat32 tensor)
   toFloat := fun x => pure x.toFloat
