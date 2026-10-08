@@ -21,12 +21,14 @@
  *   TORCHLEAN_NUM_THREADS=N    worker count (default: online CPUs)
  *   TORCHLEAN_FASTCPU_STATS=1  print per-kernel call counts and times at exit
  *   TORCHLEAN_FASTCPU_DEBUG=1  print dictionaries that fail identification
- *   TORCHLEAN_FASTCPU_KEEP_MEMORY=0  let mimalloc return freed memory to the OS
+ *   TORCHLEAN_FASTCPU_KEEP_MEMORY=1  keep freed memory committed (see below)
  *
- * By default the first kernel call sets mimalloc's purge delay to -1 (unless
- * MIMALLOC_PURGE_DELAY is set): freed tensor buffers stay committed and are
- * reused, instead of being returned and page-faulted in again on the next
- * training step, much like PyTorch's caching allocator.
+ * With TORCHLEAN_FASTCPU_KEEP_MEMORY=1 the first kernel call sets mimalloc's
+ * purge delay to -1 (unless MIMALLOC_PURGE_DELAY is set): freed tensor
+ * buffers stay committed and are reused instead of being page-faulted in
+ * again on the next step, like PyTorch's caching allocator. At full
+ * nanoTabPFN scale this saves ~1.5 s per step but let `train` grow from ~14
+ * to ~20 GB RSS, so it is opt-in.
  */
 
 #define _GNU_SOURCE
@@ -152,7 +154,7 @@ static void tl_config_init(void) {
   }
   const char *keep = getenv("TORCHLEAN_FASTCPU_KEEP_MEMORY");
   if (tl_enabled_flag && getenv("MIMALLOC_PURGE_DELAY") == NULL &&
-      !(keep != NULL && strcmp(keep, "0") == 0) && mi_option_set != NULL) {
+      keep != NULL && strcmp(keep, "1") == 0 && mi_option_set != NULL) {
     mi_option_set(mi_option_purge_delay, -1);
   }
   const char *debug = getenv("TORCHLEAN_FASTCPU_DEBUG");
