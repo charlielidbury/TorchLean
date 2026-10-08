@@ -19,7 +19,14 @@
  * Environment:
  *   TORCHLEAN_FASTCPU=0        use the Lean reference everywhere
  *   TORCHLEAN_NUM_THREADS=N    worker count (default: online CPUs)
- *   TORCHLEAN_FASTCPU_STATS=1  print per-kernel call counts at exit
+ *   TORCHLEAN_FASTCPU_STATS=1  print per-kernel call counts and times at exit
+ *   TORCHLEAN_FASTCPU_DEBUG=1  print dictionaries that fail identification
+ *   TORCHLEAN_FASTCPU_KEEP_MEMORY=0  let mimalloc return freed memory to the OS
+ *
+ * By default the first kernel call sets mimalloc's purge delay to -1 (unless
+ * MIMALLOC_PURGE_DELAY is set): freed tensor buffers stay committed and are
+ * reused, instead of being returned and page-faulted in again on the next
+ * training step, much like PyTorch's caching allocator.
  */
 
 #define _GNU_SOURCE
@@ -32,6 +39,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Lean's allocator; only `mi_option_set` is used, and only if linked. */
+#include <lean/mimalloc.h>
+#pragma weak mi_option_set
 
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #include <cpuid.h>
@@ -138,6 +149,11 @@ static void tl_config_init(void) {
     if (value >= 1 && value <= 1024) {
       tl_thread_count = (size_t)value;
     }
+  }
+  const char *keep = getenv("TORCHLEAN_FASTCPU_KEEP_MEMORY");
+  if (tl_enabled_flag && getenv("MIMALLOC_PURGE_DELAY") == NULL &&
+      !(keep != NULL && strcmp(keep, "0") == 0) && mi_option_set != NULL) {
+    mi_option_set(mi_option_purge_delay, -1);
   }
   const char *debug = getenv("TORCHLEAN_FASTCPU_DEBUG");
   if (debug != NULL && strcmp(debug, "0") != 0) {
