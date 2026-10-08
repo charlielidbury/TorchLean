@@ -373,14 +373,20 @@ typedef struct {
   size_t row_blocks, col_blocks;
 } tl_mm_job_t;
 
+/*
+ * Tiles cover contraction indices [k0, k1). With `accumulate` the partial sums
+ * stored in `out` by the previous block are continued, so splitting the
+ * contraction into blocks keeps each output's sequential summation order.
+ */
 static void tl_mm_scalar_tile(const tl_mm_job_t *job, const double *l,
                               const double *r, double *out, size_t i0,
-                              size_t i1, size_t j0, size_t j1) {
+                              size_t i1, size_t j0, size_t j1, size_t k0,
+                              size_t k1, int accumulate) {
   for (size_t i = i0; i < i1; ++i) {
     const double *li = l + i * job->l_rs;
     for (size_t j = j0; j < j1; ++j) {
-      double acc = 0.0;
-      for (size_t k = 0; k < job->k; ++k) {
+      double acc = accumulate ? out[i * job->n + j] : 0.0;
+      for (size_t k = k0; k < k1; ++k) {
         acc = acc + li[k * job->l_cs] * r[k * job->r_rs + j];
       }
       out[i * job->n + j] = acc;
@@ -392,13 +398,17 @@ static void tl_mm_scalar_tile(const tl_mm_job_t *job, const double *l,
 #define TL_AVX2 __attribute__((target("avx2")))
 
 /* 4 rows x 8 columns: eight 4-lane accumulators. */
+#define TL_INIT(acc, ptr) ((acc) ? _mm256_loadu_pd(ptr) : _mm256_setzero_pd())
+
 TL_AVX2 static void tl_mm_avx2_4x8(const double *l, size_t l_rs, size_t l_cs,
                                     const double *r, size_t r_rs, double *out,
-                                    size_t ldo, size_t kk) {
-  __m256d c00 = _mm256_setzero_pd(), c01 = _mm256_setzero_pd();
-  __m256d c10 = _mm256_setzero_pd(), c11 = _mm256_setzero_pd();
-  __m256d c20 = _mm256_setzero_pd(), c21 = _mm256_setzero_pd();
-  __m256d c30 = _mm256_setzero_pd(), c31 = _mm256_setzero_pd();
+                                    size_t ldo, size_t kk, int acc) {
+  __m256d c00 = TL_INIT(acc, out), c01 = TL_INIT(acc, out + 4);
+  __m256d c10 = TL_INIT(acc, out + ldo), c11 = TL_INIT(acc, out + ldo + 4);
+  __m256d c20 = TL_INIT(acc, out + 2 * ldo);
+  __m256d c21 = TL_INIT(acc, out + 2 * ldo + 4);
+  __m256d c30 = TL_INIT(acc, out + 3 * ldo);
+  __m256d c31 = TL_INIT(acc, out + 3 * ldo + 4);
   const double *l0 = l, *l1 = l + l_rs, *l2 = l + 2 * l_rs,
                *l3 = l + 3 * l_rs;
   for (size_t k = 0; k < kk; ++k) {
@@ -432,9 +442,9 @@ TL_AVX2 static void tl_mm_avx2_4x8(const double *l, size_t l_rs, size_t l_cs,
 /* 4 rows x 4 columns. */
 TL_AVX2 static void tl_mm_avx2_4x4(const double *l, size_t l_rs, size_t l_cs,
                                     const double *r, size_t r_rs, double *out,
-                                    size_t ldo, size_t kk) {
-  __m256d c0 = _mm256_setzero_pd(), c1 = _mm256_setzero_pd();
-  __m256d c2 = _mm256_setzero_pd(), c3 = _mm256_setzero_pd();
+                                    size_t ldo, size_t kk, int acc) {
+  __m256d c0 = TL_INIT(acc, out), c1 = TL_INIT(acc, out + ldo);
+  __m256d c2 = TL_INIT(acc, out + 2 * ldo), c3 = TL_INIT(acc, out + 3 * ldo);
   const double *l0 = l, *l1 = l + l_rs, *l2 = l + 2 * l_rs,
                *l3 = l + 3 * l_rs;
   for (size_t k = 0; k < kk; ++k) {
@@ -454,8 +464,8 @@ TL_AVX2 static void tl_mm_avx2_4x4(const double *l, size_t l_rs, size_t l_cs,
 /* 1 row x 8 columns. */
 TL_AVX2 static void tl_mm_avx2_1x8(const double *l, size_t l_cs,
                                     const double *r, size_t r_rs, double *out,
-                                    size_t kk) {
-  __m256d c0 = _mm256_setzero_pd(), c1 = _mm256_setzero_pd();
+                                    size_t kk, int acc) {
+  __m256d c0 = TL_INIT(acc, out), c1 = TL_INIT(acc, out + 4);
   for (size_t k = 0; k < kk; ++k) {
     const double *rk = r + k * r_rs;
     __m256d a = _mm256_broadcast_sd(l + k * l_cs);
@@ -469,8 +479,8 @@ TL_AVX2 static void tl_mm_avx2_1x8(const double *l, size_t l_cs,
 /* 1 row x 4 columns. */
 TL_AVX2 static void tl_mm_avx2_1x4(const double *l, size_t l_cs,
                                     const double *r, size_t r_rs, double *out,
-                                    size_t kk) {
-  __m256d c0 = _mm256_setzero_pd();
+                                    size_t kk, int acc) {
+  __m256d c0 = TL_INIT(acc, out);
   for (size_t k = 0; k < kk; ++k) {
     __m256d a = _mm256_broadcast_sd(l + k * l_cs);
     c0 = _mm256_add_pd(c0, _mm256_mul_pd(a, _mm256_loadu_pd(r + k * r_rs)));
@@ -480,35 +490,40 @@ TL_AVX2 static void tl_mm_avx2_1x4(const double *l, size_t l_cs,
 
 TL_AVX2 static void tl_mm_avx2_tile(const tl_mm_job_t *job, const double *l,
                                      const double *r, double *out, size_t i0,
-                                     size_t i1, size_t j0, size_t j1) {
-  size_t kk = job->k, ldo = job->n;
+                                     size_t i1, size_t j0, size_t j1, size_t k0,
+                                     size_t k1, int acc) {
+  size_t kk = k1 - k0, ldo = job->n;
+  const double *lk = l + k0 * job->l_cs;
+  const double *rk = r + k0 * job->r_rs;
   size_t i = i0;
   for (; i + 4 <= i1; i += 4) {
-    const double *li = l + i * job->l_rs;
+    const double *li = lk + i * job->l_rs;
     size_t j = j0;
     for (; j + 8 <= j1; j += 8) {
-      tl_mm_avx2_4x8(li, job->l_rs, job->l_cs, r + j, job->r_rs,
-                     out + i * ldo + j, ldo, kk);
+      tl_mm_avx2_4x8(li, job->l_rs, job->l_cs, rk + j, job->r_rs,
+                     out + i * ldo + j, ldo, kk, acc);
     }
     for (; j + 4 <= j1; j += 4) {
-      tl_mm_avx2_4x4(li, job->l_rs, job->l_cs, r + j, job->r_rs,
-                     out + i * ldo + j, ldo, kk);
+      tl_mm_avx2_4x4(li, job->l_rs, job->l_cs, rk + j, job->r_rs,
+                     out + i * ldo + j, ldo, kk, acc);
     }
     if (j < j1) {
-      tl_mm_scalar_tile(job, l, r, out, i, i + 4, j, j1);
+      tl_mm_scalar_tile(job, l, r, out, i, i + 4, j, j1, k0, k1, acc);
     }
   }
   for (; i < i1; ++i) {
-    const double *li = l + i * job->l_rs;
+    const double *li = lk + i * job->l_rs;
     size_t j = j0;
     for (; j + 8 <= j1; j += 8) {
-      tl_mm_avx2_1x8(li, job->l_cs, r + j, job->r_rs, out + i * ldo + j, kk);
+      tl_mm_avx2_1x8(li, job->l_cs, rk + j, job->r_rs, out + i * ldo + j, kk,
+                     acc);
     }
     for (; j + 4 <= j1; j += 4) {
-      tl_mm_avx2_1x4(li, job->l_cs, r + j, job->r_rs, out + i * ldo + j, kk);
+      tl_mm_avx2_1x4(li, job->l_cs, rk + j, job->r_rs, out + i * ldo + j, kk,
+                     acc);
     }
     if (j < j1) {
-      tl_mm_scalar_tile(job, l, r, out, i, i + 1, j, j1);
+      tl_mm_scalar_tile(job, l, r, out, i, i + 1, j, j1, k0, k1, acc);
     }
   }
 }
@@ -559,13 +574,23 @@ static void tl_mm_task(void *ctx, size_t task) {
   const double *l = job->l + b * job->l_bs;
   const double *r = job->r + b * job->r_bs;
   double *out = job->out + b * job->m * job->n;
+  /* Contraction blocks keep a tile's operands cache-resident for long k. */
+  size_t kc = job->k > 1024 ? 256 : (job->k ? job->k : 1);
+  for (size_t k0 = 0; k0 < job->k || k0 == 0; k0 += kc) {
+    size_t k1 = k0 + kc < job->k ? k0 + kc : job->k;
+    int acc = k0 > 0;
 #if TL_HAVE_X86
-  if (tl_cpu_has_avx2()) {
-    tl_mm_avx2_tile(job, l, r, out, i0, i1, j0, j1);
-    return;
-  }
+    if (tl_cpu_has_avx2()) {
+      tl_mm_avx2_tile(job, l, r, out, i0, i1, j0, j1, k0, k1, acc);
+    } else
 #endif
-  tl_mm_scalar_tile(job, l, r, out, i0, i1, j0, j1);
+    {
+      tl_mm_scalar_tile(job, l, r, out, i0, i1, j0, j1, k0, k1, acc);
+    }
+    if (k1 >= job->k) {
+      break;
+    }
+  }
 }
 
 /* Copy a strided [batch, rows, cols] view into contiguous storage. */
@@ -591,6 +616,10 @@ static void tl_choose_blocks(tl_mm_job_t *job, size_t batch) {
   /* Aim for >= 8 tasks per thread, each with >= ~64k multiply-adds. */
   size_t threads = tl_thread_count;
   size_t target_tasks = threads * 8;
+  if (job->k > 1024) {
+    /* Long reductions cannot be split; use small output blocks instead. */
+    target_tasks = threads * 2;
+  }
   size_t row_block = job->m;
   size_t col_block = job->n;
   size_t tasks = batch;
@@ -1453,4 +1482,27 @@ LEAN_EXPORT lean_obj_res torchlean_fastcpu_fill(size_t n,
     o[i] = v;
   }
   return out;
+}
+
+/*
+ * Generic code over `[Context α]` passes `DecidableRel (· > ·)` as a partial
+ * application of TorchLean's low-priority instance `instDecidableRelGt_nN`
+ * (`Context.decidableGT`) to the type and the context. Recognise exactly that
+ * closure, with a context structurally equal to `context`. The symbol is weak
+ * so this object still links without TorchLean's generated code.
+ */
+extern lean_object *lp_TorchLean_instDecidableRelGt__nN___boxed(
+    lean_object *, lean_object *, lean_object *, lean_object *)
+    __attribute__((weak));
+
+/* Lean: `TorchLean.FastCpu.isGtOfContext (gt : @& α) (context : @& β)`. */
+LEAN_EXPORT uint8_t torchlean_fastcpu_is_gt_of_context(b_lean_obj_arg gt,
+                                                       b_lean_obj_arg context) {
+  void *instance = (void *)lp_TorchLean_instDecidableRelGt__nN___boxed;
+  if (instance == NULL || lean_is_scalar(gt) ||
+      lean_ptr_tag(gt) != LeanClosure || lean_closure_fun(gt) != instance ||
+      lean_closure_arity(gt) != 4 || lean_closure_num_fixed(gt) != 2) {
+    return 0;
+  }
+  return (uint8_t)tl_same(lean_closure_arg_cptr(gt)[1], context, 8);
 }

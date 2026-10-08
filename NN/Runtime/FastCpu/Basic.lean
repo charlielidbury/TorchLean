@@ -138,13 +138,13 @@ unsafe def floatBEq {α : Type} (beq : BEq α) : Bool :=
     sameValue beq (Context.toBEq (self := instContextFloat))
 
 /--
-The `DecidableRel (· > ·)` that generic code derives from a `Context`
-(`Context.decidableGT`, as a partial application). Kept out of line so that
-`gtOfContext Float` builds the same closure shape the eager runtime passes.
+Whether `gt` is the `DecidableRel (· > ·)` that generic code derives from a
+`Context` (a partial application of `instDecidableRelGt_nN`) at a context
+structurally equal to `context`. Recognised in C by its closure shape.
 -/
-@[noinline, instance_reducible] def gtOfContext (α : Type) [Context α] :
-    DecidableRel ((· > ·) : α → α → Prop) :=
-  inferInstance
+@[extern "torchlean_fastcpu_is_gt_of_context"]
+opaque isGtOfContext {α : Type u} {β : Type v} (gt : @& α) (context : @& β) :
+    Bool
 
 /-- `gt` decides Lean's IEEE `Float` strict order. -/
 unsafe def floatGt {α : Type} [LT α]
@@ -152,7 +152,7 @@ unsafe def floatGt {α : Type} [LT α]
   sameValue gt
       (inferInstance : DecidableRel ((· > ·) : Float → Float → Prop)) ||
     sameValue gt (Context.decidableGT (self := instContextFloat)) ||
-    sameValue gt (gtOfContext Float)
+    isGtOfContext gt instContextFloat
 
 /-- The zero is the binary64 value `+0.0`. -/
 unsafe def floatZero {α : Type} (zero : Zero α) : Bool :=
