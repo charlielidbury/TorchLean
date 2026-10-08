@@ -7,6 +7,7 @@ Authors: TorchLean Team
 module
 
 public import NN.Runtime.Autograd.TypedGraph.GraphM.Core
+public import NN.Runtime.FastCpu -- shake: keep (compiled-code fast paths)
 public import NN.Spec.Autograd.Ops
 public import NN.Spec.Core.TensorReductionShape.ConcatSlice
 

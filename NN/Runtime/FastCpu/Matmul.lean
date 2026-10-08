@@ -72,7 +72,8 @@ unsafe def matmulSpecImpl {α : Type} [storage : Storage α]
   let reference := fun (_ : Unit) =>
     noteFallback Op.matmul
       (TorchLean.Tensor.matmulSpec broadcastA broadcastB A B)
-  if isFloatBackend storage add mul zero then
+  if floatStorage storage && floatAdd add && floatMul mul &&
+      floatZero zero then
     match batchStride? batchA batch (m * n),
         batchStride? batchB batch (n * p) with
     | some strideA, some strideB =>
@@ -108,8 +109,8 @@ unsafe def matmulBackwardSpecImpl {α : Type} [storage : Storage α]
     (B : Tensor α (batchB.concat [n, p]))
     (dC : Tensor α (batch.concat [m, p])) :
     Tensor α (batchA.concat [m, n]) × Tensor α (batchB.concat [n, p]) :=
-  if isFloatBackend storage add mul zero && batchA == batch &&
-      batchB == batch then
+  if floatStorage storage && floatAdd add && floatMul mul &&
+      floatZero zero && batchA == batch && batchB == batch then
     let count := batch.size.toUSize
     let (m', n', p') := (m.toUSize, n.toUSize, p.toUSize)
     -- dA[b] = dC[b] @ B[b]ᵀ: R(j, k) = B[b, k, j].

@@ -7,6 +7,7 @@ Authors: TorchLean Team
 module
 
 public import NN.Spec.Core.Tensor.SomeTensor
+public import NN.Runtime.FastCpu -- shake: keep (compiled-code fast paths)
 
 /-!
 # Engine Core

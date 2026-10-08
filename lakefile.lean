@@ -228,6 +228,11 @@ lean_exe fastcpu_bench where
   srcDir := "bench"
   root := `FastCpuBench
 
+-- fastcpu fork: native-vs-reference bit-exactness check (diff its output across TORCHLEAN_FASTCPU).
+lean_exe fastcpu_check where
+  srcDir := "bench"
+  root := `FastCpuCheck
+
 -- Shared executable numerical formats and refinement proofs.
 require floatlib from git
   "https://github.com/lean-dojo/FloatLib" @ "main"
